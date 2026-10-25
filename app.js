@@ -208,7 +208,7 @@ function makeDraggable(card) {
         card.style.left = `${safePosition.x}px`;
         card.style.top = `${safePosition.y}px`;
       }
-      showToast(coveredText ? "Polaroids stay clear of the RSVP text." : "Polaroids can stack, but each stays visible.");
+      // showToast(coveredText ? "Polaroids stay clear of the RSVP text." : "Polaroids can stack, but each stays visible.");
     }
   };
 

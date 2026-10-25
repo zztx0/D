@@ -16,11 +16,16 @@ let supabaseClient = null;
 let visitorId = null;
 let setupError = null;
 let isUploading = false;
+let toastTimeoutId = null;
 
 function showToast(message) {
   toast.textContent = message;
   toast.classList.add("show");
-  window.setTimeout(() => toast.classList.remove("show"), 3200);
+  window.clearTimeout(toastTimeoutId);
+  toastTimeoutId = window.setTimeout(() => {
+    toast.classList.remove("show");
+    toastTimeoutId = null;
+  }, 3200);
 }
 
 function setStatus(message) {
@@ -129,28 +134,23 @@ function makeDraggable(card) {
   let startY = 0;
   let originX = 0;
   let originY = 0;
+  let activePointerId = null;
 
-  card.addEventListener("pointerdown", (event) => {
-    if (event.button !== undefined && event.button !== 0) return;
-    event.preventDefault();
-    card.setPointerCapture(event.pointerId);
-    card.classList.add("is-dragging");
-    startX = event.clientX;
-    startY = event.clientY;
-    originX = parseFloat(card.style.left) || 0;
-    originY = parseFloat(card.style.top) || 0;
-  });
-
-  card.addEventListener("pointermove", (event) => {
-    if (!card.hasPointerCapture(event.pointerId)) return;
+  const moveCard = (event) => {
+    if (event.pointerId !== activePointerId) return;
     const { margin, maxX, maxY } = getCardBounds(card);
     card.style.left = `${Math.max(margin, Math.min(maxX, originX + event.clientX - startX))}px`;
     card.style.top = `${Math.max(margin, Math.min(maxY, originY + event.clientY - startY))}px`;
-  });
+  };
 
   const stopDragging = (event) => {
+    if (event.pointerId !== activePointerId) return;
+    activePointerId = null;
+    window.removeEventListener("pointermove", moveCard);
+    window.removeEventListener("pointerup", stopDragging);
+    window.removeEventListener("pointercancel", stopDragging);
     card.classList.remove("is-dragging");
-    if (card.hasPointerCapture(event.pointerId)) card.releasePointerCapture(event.pointerId);
+
     const currentX = parseFloat(card.style.left) || 0;
     const currentY = parseFloat(card.style.top) || 0;
     if (overlapsProtectedText(currentX, currentY, card)) {
@@ -162,8 +162,21 @@ function makeDraggable(card) {
       showToast("Polaroids stay clear of the RSVP text.");
     }
   };
-  card.addEventListener("pointerup", stopDragging);
-  card.addEventListener("pointercancel", stopDragging);
+
+  card.addEventListener("pointerdown", (event) => {
+    if (activePointerId !== null) return;
+    if (event.button !== undefined && event.button !== 0) return;
+    event.preventDefault();
+    activePointerId = event.pointerId;
+    card.classList.add("is-dragging");
+    startX = event.clientX;
+    startY = event.clientY;
+    originX = parseFloat(card.style.left) || 0;
+    originY = parseFloat(card.style.top) || 0;
+    window.addEventListener("pointermove", moveCard);
+    window.addEventListener("pointerup", stopDragging);
+    window.addEventListener("pointercancel", stopDragging);
+  });
 
   card.addEventListener("keydown", (event) => {
     const directions = {
@@ -222,8 +235,7 @@ function addPhotoCard(fileName, publicUrl) {
 }
 
 function updateGalleryStatus(count) {
-  const ownFileName = visitorId ? `${visitorId}.webp` : "";
-  const hasOwnPhoto = Boolean(ownFileName && cards.has(ownFileName));
+  const hasOwnPhoto = Boolean(visitorId && hasVisitorPhoto(visitorId));
   if (count === 0) {
     setStatus("No RSVPs yet. Be the first to add your Polaroid!");
   } else if (hasOwnPhoto) {
@@ -231,6 +243,10 @@ function updateGalleryStatus(count) {
   } else {
     setStatus(`${count} ${count === 1 ? "Polaroid RSVP" : "Polaroid RSVPs"} on the guest wall · add yours with “Count me in”`);
   }
+}
+
+function hasVisitorPhoto(id) {
+  return cards.has(`${id}.webp`) || cards.has(`${id}.jpg`);
 }
 
 async function loadSharedPhotos(quiet = false) {
@@ -243,7 +259,7 @@ async function loadSharedPhotos(quiet = false) {
         sortBy: { column: "created_at", order: "asc" }
       });
       if (error) throw error;
-      const page = (data || []).filter((file) => file.name && file.name.endsWith(".webp"));
+      const page = (data || []).filter((file) => file.name && (file.name.endsWith(".webp") || file.name.endsWith(".jpg")));
       allFiles.push(...page);
       if (!data || data.length < 1000) break;
     }
@@ -288,38 +304,88 @@ function resizePhotosToFit() {
   }
 }
 
-function canvasBlob(canvas, quality) {
+function canvasBlob(canvas, quality, type) {
   return new Promise((resolve, reject) => {
     canvas.toBlob((blob) => {
       if (blob) resolve(blob);
       else reject(new Error("This browser could not prepare the photo."));
-    }, "image/webp", quality);
+    }, type, quality);
   });
 }
 
-async function convertToWebp(file) {
-  if (!file.type.startsWith("image/")) throw new Error("Choose an image file for your Polaroid.");
-  if (file.size > MAX_SOURCE_BYTES) throw new Error("Please choose a photo smaller than 24 MB.");
-  if (!window.createImageBitmap) throw new Error("This browser cannot prepare the photo. Try a recent version of Chrome, Safari, Firefox, or Edge.");
-
-  const bitmap = await createImageBitmap(file);
-  try {
-    const scale = Math.min(1, MAX_IMAGE_EDGE / Math.max(bitmap.width, bitmap.height));
+function canvasSupportsType(type) {
+  return new Promise((resolve) => {
     const canvas = document.createElement("canvas");
-    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
-    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    canvas.width = 1;
+    canvas.height = 1;
+    try {
+      canvas.toBlob((blob) => resolve(Boolean(blob && blob.type === type)), type);
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+async function convertForUpload(file) {
+  if (file.type && !file.type.startsWith("image/")) throw new Error("Choose an image file for your Polaroid.");
+  if (file.size > MAX_SOURCE_BYTES) throw new Error("Please choose a photo smaller than 24 MB.");
+
+  let bitmap = null;
+  let source = null;
+  let objectUrl = null;
+  try {
+    if (typeof window.createImageBitmap === "function") {
+      try {
+        bitmap = await window.createImageBitmap(file);
+        source = bitmap;
+      } catch {
+        // Fall back to an image element when this browser cannot decode the file as a bitmap.
+      }
+    }
+
+    if (!source) {
+      objectUrl = URL.createObjectURL(file);
+      source = await new Promise((resolve, reject) => {
+        const image = new Image();
+        image.onload = () => resolve(image);
+        image.onerror = () => reject(new Error("This browser could not read the selected photo."));
+        image.src = objectUrl;
+      });
+    }
+
+    const sourceWidth = source.width || source.naturalWidth;
+    const sourceHeight = source.height || source.naturalHeight;
+    if (!sourceWidth || !sourceHeight) throw new Error("This browser could not read the selected photo.");
+    const scale = Math.min(1, MAX_IMAGE_EDGE / Math.max(sourceWidth, sourceHeight));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(sourceWidth * scale));
+    canvas.height = Math.max(1, Math.round(sourceHeight * scale));
     const context = canvas.getContext("2d", { alpha: false });
     if (!context) throw new Error("This browser could not prepare the photo.");
-    context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    context.drawImage(source, 0, 0, canvas.width, canvas.height);
 
-    for (const quality of [0.84, 0.74, 0.64, 0.54]) {
-      const blob = await canvasBlob(canvas, quality);
-      if (blob.type !== "image/webp") throw new Error("This browser cannot convert photos to WebP. Try a recent browser.");
-      if (blob.size <= MAX_UPLOAD_BYTES) return blob;
+    let encodedImage = false;
+    const outputTypes = await canvasSupportsType("image/webp")
+      ? ["image/webp", "image/jpeg"]
+      : ["image/jpeg"];
+    for (const type of outputTypes) {
+      for (const quality of [0.84, 0.74, 0.64, 0.54]) {
+        let blob;
+        try {
+          blob = await canvasBlob(canvas, quality, type);
+        } catch {
+          break;
+        }
+        if (blob.type !== type) break;
+        encodedImage = true;
+        if (blob.size <= MAX_UPLOAD_BYTES) return blob;
+      }
     }
+    if (!encodedImage) throw new Error("This browser could not encode the photo. Update Safari or choose a JPEG/PNG copy.");
     throw new Error("That photo is still too large after compression. Try a smaller image.");
   } finally {
-    bitmap.close();
+    if (bitmap && typeof bitmap.close === "function") bitmap.close();
+    if (objectUrl) URL.revokeObjectURL(objectUrl);
   }
 }
 
@@ -340,13 +406,14 @@ function celebrateUpload() {
 
 async function uploadPhoto(file) {
   if (!visitorId) throw new Error("The shared photo wall is still connecting. Please try again in a moment.");
-  const fileName = `${visitorId}.webp`;
-  if (cards.has(fileName)) throw new Error("You already added a Polaroid from this browser.");
+  if (hasVisitorPhoto(visitorId)) throw new Error("You already added a Polaroid from this browser.");
 
-  const photo = await convertToWebp(file);
+  const photo = await convertForUpload(file);
+  const extension = photo.type === "image/webp" ? "webp" : "jpg";
+  const fileName = `${visitorId}.${extension}`;
   const { error } = await supabaseClient.storage.from(BUCKET).upload(fileName, photo, {
     cacheControl: "3600",
-    contentType: "image/webp",
+    contentType: photo.type,
     upsert: false
   });
   if (error) {
@@ -406,7 +473,7 @@ rsvpButton.addEventListener("click", () => {
     showToast("The shared photo wall is still connecting. Please try again in a moment.");
     return;
   }
-  if (cards.has(`${visitorId}.webp`)) {
+  if (hasVisitorPhoto(visitorId)) {
     showToast("Your RSVP is already on the guest wall from this browser.");
     return;
   }
@@ -436,6 +503,7 @@ photoPicker.addEventListener("change", async () => {
 
 window.addEventListener("resize", resizePhotosToFit);
 document.querySelectorAll(".check input").forEach((input) => input.addEventListener("change", () => {
+  input.closest(".check")?.classList.toggle("is-checked", input.checked);
   const count = [...document.querySelectorAll(".check input:checked")].length;
   if (count === 6) showToast("Fully packed. Main character status unlocked.");
   else showToast(`${count} / 6 packed. You’re getting there.`);

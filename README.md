@@ -5,7 +5,7 @@ A static Diwali party invite with a shared Polaroid wall. The page is hosted as 
 ## What the photo wall does
 
 - Visitors click **Count me in** and choose a photo; each Polaroid is that visitor's RSVP on the shared guest wall.
-- The browser resizes and converts it to WebP before upload. Images are limited to 1600 pixels on the long edge and 4 MB after compression.
+- The browser resizes and converts photos to WebP where supported, with a JPEG fallback for Safari and iOS. Images are limited to 1600 pixels on the long edge and 4 MB after compression.
 - Every visitor can see all uploaded Polaroids. The wall refreshes for new uploads about every 25 seconds.
 - The photos are scattered randomly each time the page is opened. Dragging or using arrow keys rearranges them for that visitor only; positions are not shared or saved.
 - The center RSVP text is kept clear. Photos are placed in open space, and a drop or keyboard move that would cover text is kept or snapped to the nearest clear spot.
@@ -18,6 +18,7 @@ A static Diwali party invite with a shared Polaroid wall. The page is hosted as 
 1. Create a free Supabase project.
 2. In **Authentication → Sign In / Providers**, enable **Anonymous sign-ins**. See [Supabase anonymous sign-in docs](https://supabase.com/docs/guides/auth/auth-anonymous).
 3. Open the **SQL Editor**, paste in `supabase/setup.sql`, and run it. This creates the public `diwali-photos` bucket and the storage policies.
+   If this project was already set up, run the updated SQL again to allow the JPEG upload fallback used by Safari and iOS.
 4. In **Project Settings → API**, copy the project URL and the **publishable key** (or the legacy `anon` key).
 5. Put those values in `config.js`:
 

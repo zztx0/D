@@ -5,6 +5,7 @@ const MAX_IMAGE_EDGE = 1600;
 const REFRESH_MS = 25000;
 const TEXT_CLEARANCE = 12;
 const CARD_CLEARANCE = 10;
+const MAX_CARD_OVERLAP = 0.65;
 
 const toast = document.getElementById("toast");
 const photoPicker = document.getElementById("photoPicker");
@@ -17,6 +18,7 @@ let visitorId = null;
 let setupError = null;
 let isUploading = false;
 let toastTimeoutId = null;
+let highestCardZIndex = 2;
 
 function showToast(message) {
   toast.textContent = message;
@@ -92,38 +94,83 @@ function overlapsProtectedText(x, y, card, protectedRects = getProtectedTextRect
   );
 }
 
-function findNearestClearPosition(card, preferredX, preferredY, protectedRects = getProtectedTextRects()) {
+function bringCardToFront(card) {
+  highestCardZIndex += 1;
+  card.style.zIndex = String(highestCardZIndex);
+}
+
+function getCardOverlapScore(x, y, card) {
+  const width = card.offsetWidth;
+  const height = card.offsetHeight;
+  const area = width * height;
+  let maxRatio = 0;
+  let totalRatio = 0;
+
+  for (const other of cards.values()) {
+    if (other === card) continue;
+    const otherX = parseFloat(other.style.left) || 0;
+    const otherY = parseFloat(other.style.top) || 0;
+    const overlapWidth = Math.max(0, Math.min(x + width, otherX + other.offsetWidth) - Math.max(x, otherX));
+    const overlapHeight = Math.max(0, Math.min(y + height, otherY + other.offsetHeight) - Math.max(y, otherY));
+    const overlapArea = overlapWidth * overlapHeight;
+    if (!overlapArea) continue;
+
+    const smallerCardArea = Math.min(area, other.offsetWidth * other.offsetHeight);
+    const ratio = overlapArea / smallerCardArea;
+    maxRatio = Math.max(maxRatio, ratio);
+    totalRatio += ratio;
+  }
+
+  return { maxRatio, totalRatio };
+}
+
+function findNearestSafePosition(card, preferredX, preferredY, protectedRects = getProtectedTextRects()) {
   const { margin, maxX, maxY } = getCardBounds(card);
-  let best = null;
-  let bestDistance = Infinity;
+  let nearestSafe = null;
+  let nearestSafeDistance = Infinity;
+  let safestFallback = null;
+  let safestFallbackScore = Infinity;
+  let safestFallbackDistance = Infinity;
   const step = 14;
 
   for (let y = margin; y <= maxY; y += step) {
     for (let x = margin; x <= maxX; x += step) {
       if (overlapsProtectedText(x, y, card, protectedRects)) continue;
       const distance = (x - preferredX) ** 2 + (y - preferredY) ** 2;
-      if (distance < bestDistance) {
-        best = { x, y };
-        bestDistance = distance;
+      const { maxRatio, totalRatio } = getCardOverlapScore(x, y, card);
+      const fallbackScore = maxRatio * 1000 + totalRatio;
+
+      if (fallbackScore < safestFallbackScore || (fallbackScore === safestFallbackScore && distance < safestFallbackDistance)) {
+        safestFallback = { x, y };
+        safestFallbackScore = fallbackScore;
+        safestFallbackDistance = distance;
+      }
+      if (maxRatio <= MAX_CARD_OVERLAP && distance < nearestSafeDistance) {
+        nearestSafe = { x, y };
+        nearestSafeDistance = distance;
       }
     }
   }
-  return best;
+  return nearestSafe || safestFallback;
 }
 
 function placeCardRandomly(card) {
   const { margin, maxX, maxY } = getCardBounds(card);
   const protectedRects = getProtectedTextRects();
   let position = null;
+  let bestOverlap = Infinity;
   for (let attempt = 0; attempt < 500; attempt++) {
     const x = margin + Math.random() * Math.max(0, maxX - margin);
     const y = margin + Math.random() * Math.max(0, maxY - margin);
-    if (!overlapsProtectedText(x, y, card, protectedRects)) {
+    if (overlapsProtectedText(x, y, card, protectedRects)) continue;
+    const { maxRatio, totalRatio } = getCardOverlapScore(x, y, card);
+    if (maxRatio <= MAX_CARD_OVERLAP && totalRatio < bestOverlap) {
       position = { x, y };
-      break;
+      bestOverlap = totalRatio;
+      if (totalRatio === 0) break;
     }
   }
-  if (!position) position = findNearestClearPosition(card, margin, margin);
+  if (!position) position = findNearestSafePosition(card, margin, margin, protectedRects);
   card.style.left = `${position?.x ?? margin}px`;
   card.style.top = `${position?.y ?? margin}px`;
   card.style.setProperty("--tilt", `${(Math.random() * 12 - 6).toFixed(1)}deg`);
@@ -153,13 +200,15 @@ function makeDraggable(card) {
 
     const currentX = parseFloat(card.style.left) || 0;
     const currentY = parseFloat(card.style.top) || 0;
-    if (overlapsProtectedText(currentX, currentY, card)) {
-      const clearPosition = findNearestClearPosition(card, currentX, currentY);
-      if (clearPosition) {
-        card.style.left = `${clearPosition.x}px`;
-        card.style.top = `${clearPosition.y}px`;
+    const coveredText = overlapsProtectedText(currentX, currentY, card);
+    const completelyStacked = getCardOverlapScore(currentX, currentY, card).maxRatio > MAX_CARD_OVERLAP;
+    if (coveredText || completelyStacked) {
+      const safePosition = findNearestSafePosition(card, currentX, currentY);
+      if (safePosition) {
+        card.style.left = `${safePosition.x}px`;
+        card.style.top = `${safePosition.y}px`;
       }
-      showToast("Polaroids stay clear of the RSVP text.");
+      showToast(coveredText ? "Polaroids stay clear of the RSVP text." : "Polaroids can stack, but each stays visible.");
     }
   };
 
@@ -167,6 +216,7 @@ function makeDraggable(card) {
     if (activePointerId !== null) return;
     if (event.button !== undefined && event.button !== 0) return;
     event.preventDefault();
+    bringCardToFront(card);
     activePointerId = event.pointerId;
     card.classList.add("is-dragging");
     startX = event.clientX;
@@ -177,6 +227,8 @@ function makeDraggable(card) {
     window.addEventListener("pointerup", stopDragging);
     window.addEventListener("pointercancel", stopDragging);
   });
+
+  card.addEventListener("focus", () => bringCardToFront(card));
 
   card.addEventListener("keydown", (event) => {
     const directions = {
@@ -192,14 +244,14 @@ function makeDraggable(card) {
     const step = event.shiftKey ? 25 : 10;
     const nextX = Math.max(margin, Math.min(maxX, (parseFloat(card.style.left) || 0) + direction[0] * step));
     const nextY = Math.max(margin, Math.min(maxY, (parseFloat(card.style.top) || 0) + direction[1] * step));
-    if (!overlapsProtectedText(nextX, nextY, card)) {
+    if (!overlapsProtectedText(nextX, nextY, card) && getCardOverlapScore(nextX, nextY, card).maxRatio <= MAX_CARD_OVERLAP) {
       card.style.left = `${nextX}px`;
       card.style.top = `${nextY}px`;
     } else {
-      const clearPosition = findNearestClearPosition(card, nextX, nextY);
-      if (clearPosition) {
-        card.style.left = `${clearPosition.x}px`;
-        card.style.top = `${clearPosition.y}px`;
+      const safePosition = findNearestSafePosition(card, nextX, nextY);
+      if (safePosition) {
+        card.style.left = `${safePosition.x}px`;
+        card.style.top = `${safePosition.y}px`;
       }
     }
   });
@@ -210,7 +262,7 @@ function addPhotoCard(fileName, publicUrl) {
   card.className = "polaroid";
   card.tabIndex = 0;
   card.setAttribute("role", "group");
-  card.setAttribute("aria-label", "A shared Diwali Polaroid. Drag to arrange it, or use the arrow keys.");
+  card.setAttribute("aria-label", "A shared Diwali Polaroid. Drag to stack it above other photos, or use the arrow keys.");
 
   const image = document.createElement("img");
   image.src = publicUrl;
@@ -229,6 +281,7 @@ function addPhotoCard(fileName, publicUrl) {
   caption.textContent = "Diwali memories ✳";
   card.append(image, caption);
   rsvpSection.appendChild(card);
+  bringCardToFront(card);
   placeCardRandomly(card);
   makeDraggable(card);
   cards.set(fileName, card);
@@ -295,9 +348,9 @@ function resizePhotosToFit() {
     const { margin, maxX, maxY } = getCardBounds(card);
     let x = Math.max(margin, Math.min(maxX, parseFloat(card.style.left) || margin));
     let y = Math.max(margin, Math.min(maxY, parseFloat(card.style.top) || margin));
-    if (overlapsProtectedText(x, y, card, protectedRects)) {
-      const clearPosition = findNearestClearPosition(card, x, y, protectedRects);
-      if (clearPosition) ({ x, y } = clearPosition);
+    if (overlapsProtectedText(x, y, card, protectedRects) || getCardOverlapScore(x, y, card).maxRatio > MAX_CARD_OVERLAP) {
+      const safePosition = findNearestSafePosition(card, x, y, protectedRects);
+      if (safePosition) ({ x, y } = safePosition);
     }
     card.style.left = `${x}px`;
     card.style.top = `${y}px`;
